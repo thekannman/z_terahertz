@@ -7,7 +7,7 @@ DEBUG = -g
 LFLAGS += $(DEBUG) -Wall
 CFLAGS += $(DEBUG) -Wall -c
 LIBFLAGS = -c -static -fpic
-TARGET = bin/z_anisotropy
+TARGET = bin/z_thz
 
 SRCEXT = cpp
 SOURCES = $(shell find $(SRCDIR) -type f -name '*.$(SRCEXT)')
