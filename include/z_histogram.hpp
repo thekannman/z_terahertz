@@ -65,6 +65,14 @@ class Histogram {
     array_ *= rhs;
   }
 
+  // Weights histogram by volume of spherical shell
+  inline void WeightByShellVolume() {
+    double sphere_factor = 4.0*M_PI/3.0*bin_width_*bin_width_*bin_width_;
+    for (int i = 0; i < number_of_bins_; ++i) {
+      array_(i) *= 1.0/sphere_factor/(((i+1)*(i+1)*(i+1)-i*i*i));
+    }
+  }
+
   inline void PrintFraction(const std::string& filename) {
     filename_ = filename;
     PrintFraction();

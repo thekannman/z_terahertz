@@ -23,7 +23,8 @@
 
 // TODO(Zak): The original version had various solvation mode calculations
 // included. Those calculations need to be made into their own program.
-
+// TODO(Zak): The original version had printouts of subcontributions
+// (perm,ind,ion,etc) as well as their cross contributions. Add those back in.
 #include <fftw3.h>
 #include <complex>
 #include "xdrfile_trr.h"
@@ -34,7 +35,7 @@
 #include "z_constants.hpp"
 #include "z_conversions.hpp"
 #include "z_molecule.hpp"
-#include "z_atom_group.hpp"
+#include "z_subsystem_group.hpp"
 #include "z_gromacs.hpp"
 
 namespace po = boost::program_options;
@@ -83,28 +84,38 @@ int main (int argc, char *argv[]) {
   groups = ReadNdx(vm["index"].as<std::string>());
   std::vector<Molecule> molecules = GenMolecules(vm["top"].as<std::string>(),
                                                  params);
-  AtomGroup all_atoms(vm["gro"].as<std::string>(), molecules);
-  AtomGroup oxygen_group(vm["oxygen"].as<std::string>(),
-                           SelectGroup(groups, vm["oxygen"].as<std::string>()),
-                           all_atoms);
-  AtomGroup water_group(vm["water"].as<std::string>(),
-                         SelectGroup(groups, vm["water"].as<std::string>()),
-                         all_atoms);
+
+  SystemGroup all_atoms(vm["gro"].as<std::string>(), molecules);
+
+  SubsystemGroup *oxygen_group_pointer =
+      SubsystemGroup::MakeSubsystemGroup(
+          vm["oxygen"].as<std::string>(),
+          SelectGroup(groups, vm["oxygen"].as<std::string>()), all_atoms);
+  SubsystemGroup &oxygen_group = *oxygen_group_pointer;
+  SubsystemGroup *water_group_pointer =
+      SubsystemGroup::MakeSubsystemGroup(
+          vm["water"].as<std::string>(),
+          SelectGroup(groups, vm["water"].as<std::string>()), all_atoms);
+  SubsystemGroup &water_group = *water_group_pointer;
 
   oxygen_group.set_gammas(1.495e-3);
 
   bool just_water = true;
   std::vector<int> solute_indices;
   std::string solute_group_name;
-  solute_group_name = vm.count("solute") ? vm["solute"].as<std::string>() : "";
-  AtomGroup solute_group(solute_group_name, solute_indices, all_atoms);
   if (vm.count("solute")) {
     solute_indices = SelectGroup(groups, vm["solute"].as<std::string>());
     just_water = false;
     assert(vm.count("cation_gamma") > 0);
     assert(vm.count("anion_gamma") > 0);
-    solute_group.set_ion_gammas(cation_gamma, anion_gamma);
   }
+  solute_group_name = vm.count("solute") ? vm["solute"].as<std::string>() : "";
+
+  SubsystemGroup *solute_group_pointer =
+      SubsystemGroup::MakeSubsystemGroup(solute_group_name, solute_indices,
+                                         all_atoms);
+  SubsystemGroup &solute_group = *solute_group_pointer;
+  solute_group.set_ion_gammas(cation_gamma, anion_gamma);
 
   arma::mat dipole = arma::zeros<arma::mat>(steps_guess, DIMS);
   arma::mat conductivity = arma::zeros<arma::mat>(steps_guess, DIMS);
@@ -121,37 +132,13 @@ int main (int argc, char *argv[]) {
   params.set_box(box);
   params.set_max_time(vm["max_time"].as<double>());
 
-  bool oxygen_field_check = false, solute_field_check;
   int  corr_int = 1;
-  const double kCutoff = 0.7831, kCutoffSquared = kCutoff*kCutoff;
 
-  std::string oxygen_field_filename =
-      oxygen_group.name() + "_electric_field.dat";
-  std::fstream oxygen_field_file;
-  std::string solute_field_filename =
-      solute_group.name() + "_electric_field.dat";
-  std::fstream solute_field_file;
-
-  oxygen_field_file.open(oxygen_field_filename.c_str(), std::fstream::in);
-  if (!oxygen_field_file.is_open()) {
-    oxygen_field_file.open(oxygen_field_filename.c_str(), std::fstream::out);
-  } else {
-    std::cout << "Using previous electric field data from file: " <<
-                 oxygen_field_filename << "." << std::endl;
-    oxygen_field_check = true;
-  }
-
-  solute_field_file.open(solute_field_filename.c_str(), std::fstream::in);
-  if (!solute_field_file.is_open()) {
-    solute_field_file.open(solute_field_filename.c_str(), std::fstream::out);
-  } else {
-    std::cout << "Using previous electric field data from file: " <<
-                 solute_field_filename << "." << std::endl;
-    solute_field_check = true;
-  }
+  oxygen_group.OpenFieldFile();
+  solute_group.OpenFieldFile();
 
   arma::imat nearby_molecules;
-  arma::rowvec dx;
+  arma::rowvec dx, dipole_contribution;
   rvec *v_in = NULL;
   v_in = new rvec [params.num_atoms()];
   float time, lambda, prec;
@@ -179,35 +166,17 @@ int main (int argc, char *argv[]) {
     if (!just_water)
       solute_group.set_phase_space(x_in, v_in);
 
-    oxygen_group.ZeroElectricField();
-    solute_group.ZeroElectricField();
+    oxygen_group.SetElectricField(water_group, params.box());
+    if (!just_water)
+      oxygen_group.UpdateElectricField(solute_group, params.box());
+    if (!oxygen_group.field_check())
+      oxygen_group.WriteElectricField();
 
-    if (oxygen_field_check) {
-      oxygen_group.ReadElectricField(oxygen_field_file);
-    } else {
-      oxygen_group.MarkNearbyAtoms(oxygen_group, params.box(),
-                                   kCutoffSquared, nearby_molecules);
-      oxygen_group.CalculateElectricField(water_group, params.box(),
-                                          nearby_molecules, dx, false);
-      if (!just_water)
-        oxygen_group.CalculateElectricField(solute_group, params.box(),
-                                            kCutoffSquared, dx, false);
-
-      oxygen_group.WriteElectricField(oxygen_field_file);
-    }
-    if (solute_field_check) {
-      solute_group.ReadElectricField(solute_field_file);
-    } else {
-      solute_group.MarkNearbyAtoms(oxygen_group, params.box(),
-                                   kCutoffSquared, nearby_molecules);
-      solute_group.CalculateElectricField(water_group, params.box(),
-                                          nearby_molecules, dx, false);
-      if (!just_water)
-        solute_group.CalculateElectricField(solute_group, params.box(),
-                                            kCutoffSquared, dx, false);
-
-      solute_group.WriteElectricField(solute_field_file);
-    }
+    solute_group.SetElectricField(water_group, params.box());
+    if (!just_water)
+      solute_group.UpdateElectricField(solute_group, params.box());
+    if (!solute_group.field_check())
+      solute_group.WriteElectricField();
 
     for (int i_atom = 0; i_atom < water_group.size(); ++i_atom) {
       conductivity.row(step) +=

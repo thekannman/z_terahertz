@@ -29,16 +29,16 @@
 // defined in the .top file.
 
 #include "z_subsystem_group.hpp"
-#ifndef _Z_ATOM_GROUP_HPP_
-#define _Z_ATOM_GROUP_HPP_
+#ifndef _Z_MOLECULE_GROUP_HPP_
+#define _Z_MOLECULE_GROUP_HPP_
 
 //See description above
-class AtomGroup:
+class MoleculeGroup:
   public SubsystemGroup {
  public:
   // Used for creating subsets of the all-atoms group.
-  AtomGroup(std::string name, std::vector<int> indices,
-            const SystemGroup& all_atoms) : SubsystemGroup(name, indices) {
+  MoleculeGroup(std::string name, std::vector<int> indices,
+                const SystemGroup& all_atoms) : SubsystemGroup(name, indices) {
     positions_ = arma::zeros(group_size_, DIMS);
     velocities_ = arma::zeros(group_size_, DIMS);
     Init(name, all_atoms);
@@ -71,14 +71,17 @@ class AtomGroup:
     // TODO(Zak): allow adjustement of velocity based
     // on Maxwell-Boltzmann distribution instead of
     // simple replacement.
-    AddMolecule(group_size_, new_molecule, position, velocity);
+    AddMolecule(num_molecules_, new_molecule, position, velocity);
   }
 
-  // Just here to allow AtomGroup to mimic MoleculeGroup.
-  inline void ZeroCom() { return; }
+  // Resets center of mass position and velocity of all molecules.
+  inline void ZeroCom() {
+    com_positions_ = arma::zeros(num_molecules_, DIMS);
+    com_velocities_ = arma::zeros(num_molecules_, DIMS);
+  }
 
-  // Just here to allow AtomGroup to mimic MoleculeGroup.
-  inline void UpdateCom() { return; };
+  // Sets center of mass position and velocity of all molecules.
+  void UpdateCom();
 
   // Mutators
   inline void set_ion_gammas(const double cation_gamma,
@@ -86,112 +89,125 @@ class AtomGroup:
     double tol = 1.0e-3;
     index_to_gamma_.resize(group_size_);
     for (int i_atom = 0; i_atom < group_size_; i_atom++) {
-      if (charge(i_atom) > tol)
+      if (index_to_molecular_charge_[i_atom] > tol)
         index_to_gamma_[i_atom] = cation_gamma;
-      else if (charge(i_atom) < -tol)
+      else if (index_to_molecular_charge_[i_atom] < -tol)
         index_to_gamma_[i_atom] = anion_gamma;
     }
   }
 
   // Accessors
-  inline int num_molecules() const { return group_size_; }
-  inline arma::mat com_positions() const { return positions(); }
-  inline arma::mat com_velocities() const { return velocities(); }
+  inline int num_molecules() const { return num_molecules_; }
+  inline arma::mat com_positions() const { return com_positions_; }
+  inline arma::mat com_velocities() const { return com_velocities_; }
 
   inline arma::rowvec com_position(int molecule) const {
-    return position(molecule);
+    return com_positions_.row(molecule);
   }
 
   inline arma::rowvec com_velocity(int molecule) const {
-    return velocity(molecule);
+    return com_velocities_.row(molecule);
   }
 
   inline double com_position(int molecule, int dim) const {
-    return position(molecule, dim);
+    return com_positions_(molecule, dim);
   }
 
   inline double com_velocity(int molecule, int dim) const {
-    return velocity(molecule, dim);
+    return com_velocities_(molecule, dim);
   }
 
   inline arma::rowvec com_velocity_xy(int molecule) const {
-    return velocity_xy(molecule);
+    return com_velocities_(molecule, arma::span(0,1));
   }
 
-  inline int molecular_index(int atom) const { return atom; }
+  inline int molecular_index(int atom) const {
+    return index_to_molecular_index_[atom];
+  }
 
   // Used to be molecule_mass
   inline double molecular_mass(int molecule) const {
-    return mass(molecule);
+    return molecular_index_to_mass_[molecule];
   }
 
   inline double molecular_charge(int molecule) const {
-    return charge(molecule);
+    return molecular_index_to_charge_[molecule];
   }
 
   inline int molecular_index_to_molecule(int molecule) const {
-    return index_to_molecule_[molecule];
+    return molecular_index_to_molecule_[molecule];
   }
 
-  inline void SetElectricField(const ParticleGroup& other_group,
-                               const arma::rowvec& box) {
-    ZeroElectricField();
-    if (field_check_) {
-      ReadElectricField(field_file_);
-    } else {
-      std::fill(included_in_field_.begin(), included_in_field_.end(), false);
-      if (other_group.has_molecules()) {
-        MarkNearbyAtoms(other_group, box, kFieldCutoffSquared(), nearby_molecules);
-        CalculateElectricField(other_group, box, nearby_molecules, dx);
-      } else {
-        CalculateElectricField(other_group, box, kFieldCutoffSquared(), dx);
-      }
+  inline void PermanentDipole(const int molecule, const arma::rowvec& box,
+                              arma::rowvec& dipole,
+                              const bool zero_first = false) {
+    if(zero_first)
+      dipole = arma::zeros<arma::rowvec>(DIMS);
+    int first_index = first_index_in_molecule_[molecule];
+    int last_index = last_index_in_molecule_[molecule];
+    for (int i_atom = first_index+1; i_atom <= last_index; ++i_atom) {
+      FindDxNoShift(dx, position(first_index), position(i_atom), box);
+      dipole += dx*index_to_charge_[i_atom];
     }
   }
 
-  inline void UpdateElectricField(const ParticleGroup& other_group,
-                                  const arma::rowvec& box) {
-    if (field_check_)
-      return;
-    if (other_group.has_molecules()) {
-      MarkNearbyAtoms(other_group, box, kFieldCutoffSquared(),
-                      nearby_molecules);
-      CalculateElectricField(other_group, box, nearby_molecules, dx);
-    } else {
-      CalculateElectricField(other_group, box, kFieldCutoffSquared(), dx);
-    }
-  }
-
-  inline void InducedDipole(const int atom, arma::rowvec& dipole,
+  inline void InducedDipole(const int molecule, arma::rowvec& dipole,
                             const bool zero_first = false) const {
     if(zero_first)
       dipole = arma::zeros<arma::rowvec>(DIMS);
-    dipole += electric_field(atom)*gamma(atom);
+    int first_index = first_index_in_molecule_[molecule];
+    int last_index = last_index_in_molecule_[molecule];
+    for (int i_atom = first_index+1; i_atom <= last_index; ++i_atom) {
+      dipole += electric_field(i_atom)*gamma(i_atom);
+    }
   }
 
+ protected:
+
  private:
+  // TODO(Zak): Will write later. No need for these yet.
+  inline void SetElectricField(const ParticleGroup& other_group,
+                               const arma::rowvec& box) {};
+
+  // TODO(Zak): Will write later. No need for these yet.
+  inline void UpdateElectricField(const ParticleGroup& other_group,
+                                  const arma::rowvec& box) {};
+
   // Called by all constructors to create needed initialize
   // vectors and matrices.
   void Init(const std::string& name, const SystemGroup& all_atoms);
 
   // Takes care of the atom-level removal for RemoveMolecule
-  void RemoveAtom(const int index);
+   void RemoveAtom(const int index);
 
   // Takes care of the atom-level addition for AddMolecule
-  void AddAtom(const Atom atom_to_add, const int molecule_id,
+   void AddAtom(const Atom atom_to_add, const int molecule_id,
                        const arma::rowvec& position,
                        const arma::rowvec& velocity);
 
- // Just here to allow AtomGroup to mimic MoleculeGroup.
   inline void CalculateMolecularCharges (
       const std::vector<double>& molecular_index_to_charge) {
-    return;
+    index_to_molecular_charge_.resize(group_size_);
+    for (int i_mol = 0; i_mol < num_molecules_; ++i_mol) {
+      molecular_index_to_charge_[i_mol] =
+          molecular_index_to_charge[molecular_index_to_molecule(i_mol)];
+    }
+    for (int i_atom = 0; i_atom < group_size_; ++i_atom) {
+      index_to_molecular_charge_[i_atom] =
+          molecular_index_to_charge[index_to_molecular_index_[i_atom]];
+    }
   }
 
-  inline void PermanentDipole(const int molecule, const arma::rowvec& box,
-                              arma::rowvec& dipole,
-                              const bool zero_first = false) {};
-
+  std::vector<double> index_to_molecular_charge_;
+  std::vector<int> index_to_molecular_index_;
+  std::vector<double> molecular_index_to_mass_;
+  std::vector<double> molecular_index_to_charge_;
+  std::vector<int>molecular_index_to_molecule_;
+  int num_molecules_;
+  arma::mat com_positions_;
+  arma::mat com_velocities_;
+  std::vector<int> first_index_in_molecule_;
+  std::vector<int> last_index_in_molecule_;
 };
 
 #endif

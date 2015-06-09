@@ -83,7 +83,7 @@ class CxTCF:
     fourier_transform_ *= multiplier;
   }
 
-  inline void FreqWeighting(double power) {
+  inline void FreqWeighting(const double power) {
     for (int i = 0; i < spec_length_; ++i) {
       fourier_transform_(i) *= std::pow(i*freq_spacing_omega_, power);
     }

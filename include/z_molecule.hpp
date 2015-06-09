@@ -48,6 +48,8 @@ class Molecule {
   inline std::vector<Atom> atoms() const { return atoms_; }
   inline std::vector<Atom>::const_iterator begin() const {
     return atoms_.begin(); }
+  inline const Atom front() const {
+    return atoms_.front(); }
   inline std::vector<Atom>::const_iterator end() const { return atoms_.end(); }
 
   inline std::string name() const { return name_; }
